@@ -1,0 +1,391 @@
+"""
+EMOTION DETECTION SYSTEM WITH LIVE RECORDING
+- Automatic model training
+- Real-time recording with stop button
+- Accurate emotion prediction
+"""
+
+# Install required packages
+!pip install -q numpy librosa scikit-learn pydub matplotlib ipywidgets
+!apt-get install -y ffmpeg &> /dev/null
+
+import os
+import numpy as np
+import librosa
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+import joblib
+from IPython.display import Audio, display, Javascript, HTML, clear_output
+from google.colab import output, files
+import warnings
+warnings.filterwarnings('ignore')
+
+# Configuration
+class Config:
+    SAMPLE_RATE = 22050
+    DURATION = None  # Now variable for live recording
+    N_MFCC = 13
+    MODEL_DIR = "/content/models"
+    DATA_DIR = "/content/drive/MyDrive/intern /RAVDESS"
+
+    EMOTION_MAP = {
+        '01': 'neutral', '02': 'calm', '03': 'happy',
+        '04': 'sad', '05': 'angry', '06': 'fearful',
+        '07': 'disgust', '08': 'surprised'
+    }
+
+    @staticmethod
+    def setup_dirs():
+        os.makedirs(Config.MODEL_DIR, exist_ok=True)
+
+# Audio Processing
+class AudioProcessor:
+    @staticmethod
+    def extract_features(audio, sr):
+        try:
+            # Process variable length audio
+            mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=Config.N_MFCC)
+            chroma = librosa.feature.chroma_stft(y=audio, sr=sr)
+            mel = librosa.feature.melspectrogram(y=audio, sr=sr)
+
+            features = np.concatenate([
+                np.mean(mfcc, axis=1),
+                np.std(mfcc, axis=1),
+                np.mean(chroma, axis=1),
+                np.mean(mel, axis=1),
+                [librosa.feature.rms(y=audio)[0].mean()],
+                [librosa.feature.zero_crossing_rate(audio)[0].mean()]
+            ])
+            return features
+        except Exception as e:
+            print(f"Error processing audio: {str(e)}")
+            return None
+
+# Model Training
+class EmotionTrainer:
+    def __init__(self):
+        self.model = SVC(kernel='rbf', C=10, gamma=0.01, probability=True, class_weight='balanced')
+        self.scaler = StandardScaler()
+        self.le = LabelEncoder()
+
+    def train(self, X, y):
+        # Encode labels
+        y_encoded = self.le.fit_transform(y)
+
+        # Train-test split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_encoded, test_size=0.2, stratify=y_encoded, random_state=42
+        )
+
+        # Feature scaling
+        X_train = self.scaler.fit_transform(X_train)
+        X_test = self.scaler.transform(X_test)
+
+        # Train model
+        self.model.fit(X_train, y_train)
+
+        # Evaluate
+        self._evaluate(X_test, y_test)
+
+    def _evaluate(self, X_test, y_test):
+        y_pred = self.model.predict(X_test)
+
+        print("\n=== Model Evaluation ===")
+        print(classification_report(
+            y_test, y_pred,
+            target_names=self.le.classes_
+        ))
+
+        plt.figure(figsize=(10, 8))
+        cm = confusion_matrix(y_test, y_pred)
+        disp = ConfusionMatrixDisplay(
+            confusion_matrix=cm,
+            display_labels=self.le.classes_
+        )
+        disp.plot(cmap='Blues')
+        plt.title("Confusion Matrix")
+        plt.show()
+
+    def save(self):
+        Config.setup_dirs()
+        joblib.dump(self.model, f"{Config.MODEL_DIR}/model.pkl")
+        joblib.dump(self.scaler, f"{Config.MODEL_DIR}/scaler.pkl")
+        joblib.dump(self.le, f"{Config.MODEL_DIR}/label_encoder.pkl")
+        print("Model saved successfully")
+
+# Live Recording Interface
+class LiveRecorder:
+    def __init__(self):
+        self.recording = False
+        self.audio_chunks = []
+
+    def start_recording(self):
+        self.recording = True
+        self.audio_chunks = []
+
+        display(HTML("""
+        <div style="text-align: center;">
+            <button id="stopBtn" style="
+                padding: 12px 24px;
+                font-size: 16px;
+                background: #EA4335;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                margin: 10px;
+            ">Stop Recording</button>
+            <div id="status">Recording... Speak now</div>
+            <canvas id="visualizer" width="400" height="100"></canvas>
+        </div>
+        """))
+
+        display(Javascript("""
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+
+        let audioChunks = [];
+        let mediaRecorder;
+        let audioContext;
+        let analyser;
+
+        // Visualization function
+        function draw() {
+            requestAnimationFrame(draw);
+            if (!analyser) return;
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteTimeDomainData(dataArray);
+
+            ctx.fillStyle = 'rgb(240, 240, 240)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgb(66, 133, 244)';
+            ctx.beginPath();
+
+            const sliceWidth = canvas.width * 1.0 / bufferLength;
+            let x = 0;
+
+            for(let i = 0; i < bufferLength; i++) {
+                const v = dataArray[i] / 128.0;
+                const y = v * canvas.height/2;
+
+                if(i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+
+                x += sliceWidth;
+            }
+
+            ctx.lineTo(canvas.width, canvas.height/2);
+            ctx.stroke();
+        }
+
+        draw();
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+                mediaRecorder = new MediaRecorder(stream);
+
+                // Setup audio analysis
+                audioContext = new AudioContext();
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+
+                mediaRecorder.ondataavailable = e => {
+                    audioChunks.push(e.data);
+                };
+
+                mediaRecorder.start(100); // Collect data every 100ms
+
+                stopBtn.onclick = () => {
+                    mediaRecorder.stop();
+                    statusDiv.textContent = "Processing recording...";
+
+                    mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(audioChunks, {type: 'audio/wav'});
+                        const arrayBuffer = await audioBlob.arrayBuffer();
+                        const bytes = Array.from(new Uint8Array(arrayBuffer));
+
+                        google.colab.kernel.invokeFunction(
+                            'notebook.save_recording',
+                            [bytes], {}
+                        );
+                    };
+                };
+            } catch(err) {
+                statusDiv.textContent = "Error: " + err.message;
+            }
+        }
+
+        startRecording();
+        """))
+
+        def save_recording(bytes):
+            audio_bytes = np.array(bytes, dtype=np.uint8)
+            with open('recording.wav', 'wb') as f:
+                f.write(audio_bytes)
+            return 'recording.wav'
+
+        output.register_callback('notebook.save_recording', save_recording)
+
+# Main Application
+class EmotionApp:
+    def __init__(self):
+        self.detector = None
+        self.recorder = LiveRecorder()
+        self.trainer = EmotionTrainer()
+
+    def load_dataset(self):
+        features, labels = [], []
+
+        for root, _, files in os.walk(Config.DATA_DIR):
+            for file in files:
+                if file.endswith(".wav"):
+                    emotion_code = file.split('-')[2]
+                    emotion = Config.EMOTION_MAP.get(emotion_code)
+
+                    if emotion:
+                        file_path = os.path.join(root, file)
+                        audio, sr = librosa.load(file_path, sr=Config.SAMPLE_RATE)
+                        feat = AudioProcessor.extract_features(audio, sr)
+
+                        if feat is not None:
+                            features.append(feat)
+                            labels.append(emotion)
+
+        return np.array(features), np.array(labels)
+
+    def train_model(self):
+        print("Loading dataset...")
+        X, y = self.load_dataset()
+        print(f"Loaded {len(X)} samples")
+
+        print("Training model...")
+        self.trainer.train(X, y)
+        self.trainer.save()
+
+        # Load the trained model for detection
+        self.detector = self.trainer
+
+    def detect_emotion(self):
+        if not self.detector:
+            print("Please train the model first!")
+            return
+
+        print("\nStarting live recording...")
+        print("Click the stop button when finished speaking")
+        self.recorder.start_recording()
+
+        # Wait for recording to complete
+        input("\nPress Enter after stopping the recording...")
+
+        try:
+            audio, sr = librosa.load('recording.wav', sr=Config.SAMPLE_RATE)
+            display(Audio(audio, rate=sr))
+
+            features = AudioProcessor.extract_features(audio, sr)
+            if features is None:
+                return
+
+            features = self.detector.scaler.transform([features])
+            probabilities = self.detector.model.predict_proba(features)[0]
+            prediction = self.detector.le.inverse_transform([np.argmax(probabilities)])[0]
+
+            # Display results
+            self._show_results(prediction, probabilities)
+
+        except Exception as e:
+            print(f"Error during detection: {str(e)}")
+
+    def _show_results(self, prediction, probabilities):
+        # Visualization
+        plt.figure(figsize=(14, 6))
+
+        # Emotion probabilities
+        plt.subplot(1, 2, 1)
+        colors = plt.cm.plasma(np.linspace(0, 1, len(self.detector.le.classes_)))
+        bars = plt.barh(self.detector.le.classes_, probabilities, color=colors)
+        plt.title('Emotion Probabilities', fontsize=14, pad=20)
+        plt.xlabel('Confidence', fontsize=12)
+
+        # Add probability labels
+        for bar in bars:
+            width = bar.get_width()
+            plt.text(width + 0.02, bar.get_y() + bar.get_height()/2,
+                    f'{width:.2f}', ha='left', va='center')
+
+        # Audio waveform
+        plt.subplot(1, 2, 2)
+        audio, sr = librosa.load('recording.wav', sr=Config.SAMPLE_RATE)
+        librosa.display.waveshow(audio, sr=sr)
+        plt.title('Audio Waveform', fontsize=14, pad=20)
+        plt.xlabel('Time (s)', fontsize=12)
+
+        plt.tight_layout()
+        plt.show()
+
+        # Display prediction
+        emotion_colors = {
+            'angry': '#EA4335',
+            'happy': '#FBBC05',
+            'sad': '#4285F4',
+            'neutral': '#34A853',
+            'surprised': '#FF6D01',
+            'fearful': '#9E2896',
+            'disgust': '#009688',
+            'calm': '#673AB7'
+        }
+
+        color = emotion_colors.get(prediction, '#000000')
+        display(HTML(f"""
+        <div style="text-align: center; margin: 20px; padding: 20px; background: #f5f5f5; border-radius: 8px;">
+            <h2 style="margin-bottom: 10px;">DETECTED EMOTION:</h2>
+            <h1 style="color: {color}; font-size: 48px; margin: 0; text-transform: uppercase;">{prediction}</h1>
+        </div>
+        """))
+
+# Run the application
+def main():
+    print("""
+    =============================
+      EMOTION DETECTION SYSTEM
+    =============================
+    """)
+
+    app = EmotionApp()
+
+    while True:
+        print("\n===== MAIN MENU =====")
+        print("1. Train Model")
+        print("2. Live Emotion Detection")
+        print("3. Exit")
+
+        choice = input("\nSelect option (1-3): ").strip()
+
+        if choice == '1':
+            print("\n=== MODEL TRAINING ===")
+            app.train_model()
+
+        elif choice == '2':
+            print("\n=== LIVE EMOTION DETECTION ===")
+            app.detect_emotion()
+
+        elif choice == '3':
+            print("\nExiting application...")
+            break
+
+        else:
+            print("\nInvalid option. Please try again.")
+
+if __name__ == "__main__":
+    Config.setup_dirs()
+    main()
