@@ -1,0 +1,50 @@
+
+    =============================
+      EMOTION DETECTION SYSTEM
+    =============================
+    
+
+===== MAIN MENU =====
+1. Train Model
+2. Live Emotion Detection
+3. Exit
+
+=== MODEL TRAINING ===
+Loading dataset...
+Loaded 1443 samples
+Training model...
+
+=== Model Evaluation ===
+              precision    recall  f1-score   support
+
+       angry       0.70      0.77      0.73        39
+        calm       0.72      0.72      0.72        39
+     disgust       0.80      0.74      0.77        38
+     fearful       0.79      0.68      0.73        38
+       happy       0.68      0.69      0.68        39
+     neutral       0.39      0.58      0.47        19
+         sad       0.69      0.56      0.62        39
+   surprised       0.79      0.82      0.81        38
+
+    accuracy                           0.70       289
+   macro avg       0.69      0.69      0.69       289
+weighted avg       0.71      0.70      0.71       289
+
+<Figure size 1000x800 with 0 Axes>
+
+Model saved successfully
+
+===== MAIN MENU =====
+1. Train Model
+2. Live Emotion Detection
+3. Exit
+
+=== LIVE EMOTION DETECTION ===
+
+Starting live recording...
+Click the stop button when finished speaking
+Stop Recording
+Select option (1-3): 3
+
+Exiting application...
+
